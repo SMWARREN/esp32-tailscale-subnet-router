@@ -1,0 +1,329 @@
+diff --git a/libraries/MicroLink/src/ml_aead_shim.c b/libraries/MicroLink/src/ml_aead_shim.c
+new file mode 100644
+index 0000000..87187f9
+--- /dev/null
++++ b/libraries/MicroLink/src/ml_aead_shim.c
+@@ -0,0 +1,19 @@
++/* Arduino-core shim: the prebuilt ESP32 Arduino mbedTLS omits ChaCha20-Poly1305,
++ * so MicroLink's Noise AEAD uses the bundled RFC 7539 reference implementation.
++ * Tailscale's 96-bit nonce is 4 zero bytes + 64-bit BIG-endian counter, while the
++ * reference code takes a 64-bit counter laid out little-endian after 4 zero bytes,
++ * so the counter is byte-swapped here. */
++#include <stdint.h>
++#include <stdbool.h>
++#include <stddef.h>
++#include "chacha20poly1305.h"
++
++void ml_aead_encrypt(const uint8_t *key, uint64_t nonce, const uint8_t *ad, size_t ad_len,
++                     const uint8_t *pt, size_t pt_len, uint8_t *ct) {
++    chacha20poly1305_encrypt(ct, pt, pt_len, ad, ad_len, __builtin_bswap64(nonce), key);
++}
++
++int ml_aead_decrypt(const uint8_t *key, uint64_t nonce, const uint8_t *ad, size_t ad_len,
++                    const uint8_t *ct, size_t ct_len, uint8_t *pt) {
++    return chacha20poly1305_decrypt(pt, ct, ct_len, ad, ad_len, __builtin_bswap64(nonce), key) ? 0 : -1;
++}
+diff --git a/libraries/MicroLink/src/ml_config_override.h b/libraries/MicroLink/src/ml_config_override.h
+index 022c515..bd8033a 100644
+--- a/libraries/MicroLink/src/ml_config_override.h
++++ b/libraries/MicroLink/src/ml_config_override.h
+@@ -34,3 +34,6 @@
+ #ifndef CONFIG_ML_NVS_MAX_PEERS
+ #define CONFIG_ML_NVS_MAX_PEERS 64
+ #endif
++#ifndef CONFIG_ML_CONFIG_MAX_ALLOWED_PEERS
++#define CONFIG_ML_CONFIG_MAX_ALLOWED_PEERS 8
++#endif
+diff --git a/libraries/MicroLink/src/ml_lwip_lock.h b/libraries/MicroLink/src/ml_lwip_lock.h
+new file mode 100644
+index 0000000..ae144e6
+--- /dev/null
++++ b/libraries/MicroLink/src/ml_lwip_lock.h
+@@ -0,0 +1,9 @@
++#pragma once
++/* Arduino-ESP32 enables CONFIG_LWIP_CHECK_THREAD_SAFETY, so netif state changes
++ * from MicroLink tasks must hold the TCPIP core lock (unless already held/in tcpip thread). */
++#include "lwip/tcpip.h"
++#include "lwip/netif.h"
++#include "arch/sys_arch.h"
++#define ML_LOCKED(stmt) do { \
++    bool _held = sys_thread_tcpip(LWIP_CORE_LOCK_QUERY_HOLDER); \
++    if (!_held) LOCK_TCPIP_CORE(); stmt; if (!_held) UNLOCK_TCPIP_CORE(); } while (0)
+diff --git a/libraries/MicroLink/src/ml_noise.c b/libraries/MicroLink/src/ml_noise.c
+index 15aad38..7fa1d48 100644
+--- a/libraries/MicroLink/src/ml_noise.c
++++ b/libraries/MicroLink/src/ml_noise.c
+@@ -149,68 +149,14 @@ static void noise_mix_key(uint8_t ck[32], uint8_t k[32], const uint8_t *dh_outpu
+  * ChaCha20-Poly1305 AEAD (Noise uses 64-bit nonce, padded to 96-bit)
+  * ========================================================================== */
+ 
+-static int chacha20poly1305_encrypt(const uint8_t *key, uint64_t nonce,
+-                                      const uint8_t *ad, size_t ad_len,
+-                                      const uint8_t *plaintext, size_t pt_len,
+-                                      uint8_t *ciphertext) {
+-    /* Tailscale nonce: 4 bytes zeros + 8 bytes BIG-endian counter
+-     * Matches Go: binary.BigEndian.PutUint64(n[4:], counter)
+-     * V1 uses __builtin_bswap64 for the same effect */
+-    uint8_t nonce_bytes[12];
+-    memset(nonce_bytes, 0, 4);
+-    nonce_bytes[4]  = (nonce >> 56) & 0xFF;
+-    nonce_bytes[5]  = (nonce >> 48) & 0xFF;
+-    nonce_bytes[6]  = (nonce >> 40) & 0xFF;
+-    nonce_bytes[7]  = (nonce >> 32) & 0xFF;
+-    nonce_bytes[8]  = (nonce >> 24) & 0xFF;
+-    nonce_bytes[9]  = (nonce >> 16) & 0xFF;
+-    nonce_bytes[10] = (nonce >> 8) & 0xFF;
+-    nonce_bytes[11] = nonce & 0xFF;
+-
+-    mbedtls_chachapoly_context ctx;
+-    mbedtls_chachapoly_init(&ctx);
+-    mbedtls_chachapoly_setkey(&ctx, key);
+-
+-    /* ciphertext layout: encrypted_data(pt_len) + tag(16) */
+-    int ret = mbedtls_chachapoly_encrypt_and_tag(&ctx,
+-                pt_len, nonce_bytes, ad, ad_len,
+-                plaintext, ciphertext, ciphertext + pt_len);
+-
+-    mbedtls_chachapoly_free(&ctx);
+-    return ret;
++void ml_aead_encrypt(const uint8_t*,uint64_t,const uint8_t*,size_t,const uint8_t*,size_t,uint8_t*);
++int ml_aead_decrypt(const uint8_t*,uint64_t,const uint8_t*,size_t,const uint8_t*,size_t,uint8_t*);
++static int chacha20poly1305_encrypt(const uint8_t *key, uint64_t nonce, const uint8_t *ad, size_t ad_len, const uint8_t *plaintext, size_t pt_len, uint8_t *ciphertext) {
++    ml_aead_encrypt(key, nonce, ad, ad_len, plaintext, pt_len, ciphertext); return 0;
+ }
+-
+-static int chacha20poly1305_decrypt(const uint8_t *key, uint64_t nonce,
+-                                      const uint8_t *ad, size_t ad_len,
+-                                      const uint8_t *ciphertext, size_t ct_len,
+-                                      uint8_t *plaintext) {
++static int chacha20poly1305_decrypt(const uint8_t *key, uint64_t nonce, const uint8_t *ad, size_t ad_len, const uint8_t *ciphertext, size_t ct_len, uint8_t *plaintext) {
+     if (ct_len < 16) return -1;
+-
+-    /* Tailscale nonce: 4 bytes zeros + 8 bytes BIG-endian counter */
+-    uint8_t nonce_bytes[12];
+-    memset(nonce_bytes, 0, 4);
+-    nonce_bytes[4]  = (nonce >> 56) & 0xFF;
+-    nonce_bytes[5]  = (nonce >> 48) & 0xFF;
+-    nonce_bytes[6]  = (nonce >> 40) & 0xFF;
+-    nonce_bytes[7]  = (nonce >> 32) & 0xFF;
+-    nonce_bytes[8]  = (nonce >> 24) & 0xFF;
+-    nonce_bytes[9]  = (nonce >> 16) & 0xFF;
+-    nonce_bytes[10] = (nonce >> 8) & 0xFF;
+-    nonce_bytes[11] = nonce & 0xFF;
+-
+-    size_t payload_len = ct_len - 16;
+-    const uint8_t *tag = ciphertext + payload_len;
+-
+-    mbedtls_chachapoly_context ctx;
+-    mbedtls_chachapoly_init(&ctx);
+-    mbedtls_chachapoly_setkey(&ctx, key);
+-
+-    int ret = mbedtls_chachapoly_auth_decrypt(&ctx,
+-                payload_len, nonce_bytes, ad, ad_len,
+-                tag, ciphertext, plaintext);
+-
+-    mbedtls_chachapoly_free(&ctx);
+-    return ret;
++    return ml_aead_decrypt(key, nonce, ad, ad_len, ciphertext, ct_len, plaintext);
+ }
+ 
+ /* ============================================================================
+diff --git a/libraries/MicroLink/src/ml_udp.c b/libraries/MicroLink/src/ml_udp.c
+index 3919101..4cd9d53 100644
+--- a/libraries/MicroLink/src/ml_udp.c
++++ b/libraries/MicroLink/src/ml_udp.c
+@@ -1,3 +1,4 @@
++#include "ml_lwip_lock.h"
+ /**
+  * @file ml_udp.c
+  * @brief MicroLink v2 UDP Socket API
+@@ -168,7 +169,7 @@ microlink_udp_socket_t *microlink_udp_create(microlink_t *ml, uint16_t local_por
+         return NULL;
+     }
+ 
+-    sock->pcb = udp_new();
++    ML_LOCKED(sock->pcb = udp_new());
+     if (!sock->pcb) {
+         vSemaphoreDelete(sock->rx_sem);
+         free(sock);
+@@ -177,24 +178,24 @@ microlink_udp_socket_t *microlink_udp_create(microlink_t *ml, uint16_t local_por
+ 
+     /* Bind to WG netif */
+     if (ml->wg_netif) {
+-        udp_bind_netif(sock->pcb, (struct netif *)ml->wg_netif);
++        ML_LOCKED(udp_bind_netif(sock->pcb, (struct netif *)ml->wg_netif));
+     }
+ 
+     /* Bind to VPN IP + port */
+     ip_addr_t local_ip;
+     ip_to_lwip(ml->vpn_ip, &local_ip);
+ 
+-    err_t err = udp_bind(sock->pcb, &local_ip, local_port);
++    err_t err; ML_LOCKED(err = udp_bind(sock->pcb, &local_ip, local_port));
+     if (err != ERR_OK) {
+         ESP_LOGE(TAG, "udp_bind failed: %d", err);
+-        udp_remove(sock->pcb);
++        ML_LOCKED(udp_remove(sock->pcb));
+         vSemaphoreDelete(sock->rx_sem);
+         free(sock);
+         return NULL;
+     }
+ 
+     sock->local_port = sock->pcb->local_port;
+-    udp_recv(sock->pcb, udp_recv_cb, sock);
++    ML_LOCKED(udp_recv(sock->pcb, udp_recv_cb, sock));
+ 
+     /* Start RX task on Core 1 */
+     sock->rx_running = true;
+@@ -226,7 +227,7 @@ void microlink_udp_close(microlink_udp_socket_t *sock) {
+      * The callback runs from tcpip thread and accesses sock->rx_sem,
+      * so it must be unregistered before we touch any sock fields. */
+     if (sock->pcb) {
+-        udp_recv(sock->pcb, NULL, NULL);
++        ML_LOCKED(udp_recv(sock->pcb, NULL, NULL));
+     }
+ 
+     if (sock->rx_running) {
+@@ -236,7 +237,7 @@ void microlink_udp_close(microlink_udp_socket_t *sock) {
+     }
+ 
+     if (sock->pcb) {
+-        udp_remove(sock->pcb);
++        ML_LOCKED(udp_remove(sock->pcb));
+     }
+ 
+     if (sock->rx_sem) vSemaphoreDelete(sock->rx_sem);
+@@ -256,7 +257,7 @@ esp_err_t microlink_udp_send(microlink_udp_socket_t *sock, uint32_t dest_ip,
+     if (!p) return ESP_ERR_NO_MEM;
+ 
+     memcpy(p->payload, data, len);
+-    err_t err = udp_sendto(sock->pcb, p, &dest, dest_port);
++    err_t err; ML_LOCKED(err = udp_sendto(sock->pcb, p, &dest, dest_port));
+     pbuf_free(p);
+ 
+     if (err != ERR_OK) {
+diff --git a/libraries/MicroLink/src/ml_wg_mgr.c b/libraries/MicroLink/src/ml_wg_mgr.c
+index 9785ab5..081257c 100644
+--- a/libraries/MicroLink/src/ml_wg_mgr.c
++++ b/libraries/MicroLink/src/ml_wg_mgr.c
+@@ -1,3 +1,4 @@
++#include "ml_lwip_lock.h"
+ /**
+  * @file ml_wg_mgr.c
+  * @brief WireGuard Manager Task - Peer Management + DISCO
+@@ -51,7 +52,7 @@ static void wg_netif_bring_up_cb(void *ctx)
+ {
+     struct netif *netif = (struct netif *)ctx;
+     netif_set_up(netif);
+-    netif_set_link_up(netif);
++    ML_LOCKED(netif_set_link_up(netif));
+ }
+ 
+ /* Same TCPIP-context rule applies to udp_new() and any UDP-PCB field writes.
+@@ -314,7 +315,7 @@ static err_t wg_udp_output_cb(uint32_t dest_ip, uint16_t dest_port,
+     IP_SET_TYPE_VAL(dst, IPADDR_TYPE_V4);
+     ip4_addr_set_u32(ip_2_ip4(&dst), dest_ip);  /* already network byte order */
+ 
+-    err_t err = udp_sendto(s_wg_output_pcb, p, &dst, dest_port);
++    err_t err; ML_LOCKED(err = udp_sendto(s_wg_output_pcb, p, &dst, dest_port));
+     pbuf_free(p);
+ 
+     /* tailscale "send both" (wgengine/magicsock/endpoint.go send): a WireGuard
+@@ -2353,10 +2354,10 @@ void ml_wg_mgr_task(void *arg) {
+         struct netif *netif = (struct netif *)ml->wg_netif;
+         ml->wg_netif = NULL;
+         wireguardif_shutdown(netif);
+-        netif_set_link_down(netif);
+-        netif_set_down(netif);
++        ML_LOCKED(netif_set_link_down(netif));
++        ML_LOCKED(netif_set_down(netif));
+         vTaskDelay(pdMS_TO_TICKS(100));
+-        netif_remove(netif);
++        ML_LOCKED(netif_remove(netif));
+         /* The struct wireguard_device behind netif->state (every peer's
+          * keypairs; ~14.7 KB on the S3 build) was never released: only the
+          * netif around it was, so each stop/start cycle leaked it. */
+diff --git a/libraries/MicroLink/src/wireguardif.c b/libraries/MicroLink/src/wireguardif.c
+index ad2efe7..2eb86be 100644
+--- a/libraries/MicroLink/src/wireguardif.c
++++ b/libraries/MicroLink/src/wireguardif.c
+@@ -31,6 +31,7 @@
+  */
+ 
+ #include "wireguardif.h"
++#include "ml_lwip_lock.h"
+ 
+ #include <string.h>
+ #include <stdlib.h>
+@@ -255,7 +256,7 @@ static err_t wireguardif_peer_output(struct netif *netif, struct pbuf *q, struct
+ 
+ 	// Send to last known port, not the connect port
+ 	//TODO: Support DSCP and ECN - lwip requires this set on PCB globally, not per packet
+-	result = udp_sendto(device->udp_pcb, q, &peer->ip, peer->port);
++	ML_LOCKED(result = udp_sendto(device->udp_pcb, q, &peer->ip, peer->port));
+ 
+ done:
+ 	/* Throughput-collapse diag: log every send failure with path + endpoint.
+@@ -297,7 +298,7 @@ static err_t wireguardif_device_output(struct wireguard_device *device, struct p
+ 		}
+ 		return ERR_MEM;
+ 	}
+-	return udp_sendto(device->udp_pcb, q, ipaddr, port);
++	{ err_t _r; ML_LOCKED(_r = udp_sendto(device->udp_pcb, q, ipaddr, port)); return _r; }
+ }
+ 
+ static err_t wireguardif_output_to_peer(struct netif *netif, struct pbuf *q, const ip4_addr_t *ipaddr, struct wireguard_peer *peer) {
+@@ -512,7 +513,7 @@ static void wireguardif_process_response_message(struct wireguard_device *device
+ 		wireguardif_send_keepalive(device, peer);
+ 
+ 		// Set the IF-UP flag on netif
+-		netif_set_link_up(device->netif);
++		ML_LOCKED(netif_set_link_up(device->netif));
+ 		ESP_LOGW(TAG, "[WG] *** WIREGUARD SESSION ESTABLISHED wg_idx=%u ***", wg_idx);
+ 	} else {
+ 		// Packet bad
+@@ -603,7 +604,7 @@ static void wireguardif_process_data_message(struct wireguard_device *device, st
+ 					}
+ 
+ 					// Make sure that link is reported as up
+-					netif_set_link_up(device->netif);
++					ML_LOCKED(netif_set_link_up(device->netif));
+ 
+ 					if (pbuf->tot_len > 0) {
+ 						//4a. Once the packet payload is decrypted, the interface has a plaintext packet. If this is not an IP packet, it is dropped.
+@@ -1136,7 +1137,7 @@ void wireguardif_free(struct netif *netif) {
+ 	// armed is a no-op.
+ 	sys_untimeout(wireguardif_tmr, device);
+ 	if (device->udp_pcb) {
+-		udp_remove(device->udp_pcb);
++		ML_LOCKED(udp_remove(device->udp_pcb));
+ 		device->udp_pcb = NULL;
+ 	}
+ 	// The device holds the private key and every peer's session keys.
+@@ -1171,7 +1172,7 @@ err_t wireguardif_set_upstream_netif(struct netif *wg_netif,
+ 	if (!wg_netif || !wg_netif->state) return ERR_ARG;
+ 	struct wireguard_device *device = (struct wireguard_device *)wg_netif->state;
+ 	if (!device->udp_pcb) return ERR_VAL;
+-	udp_bind_netif(device->udp_pcb, upstream);
++	ML_LOCKED(udp_bind_netif(device->udp_pcb, upstream));
+ 	return ERR_OK;
+ }
+ 
+@@ -1355,7 +1356,7 @@ static void wireguardif_tmr(void *arg) {
+ 
+ 	if (!link_up) {
+ 		// Clear the IF-UP flag on netif
+-		netif_set_link_down(device->netif);
++		ML_LOCKED(netif_set_link_down(device->netif));
+ 	}
+ }
+ 
+@@ -1426,7 +1427,7 @@ void wireguardif_periodic(struct netif *netif) {
+ 		}
+ 	}
+ 	if (!link_up) {
+-		netif_set_link_down(device->netif);
++		ML_LOCKED(netif_set_link_down(device->netif));
+ 	}
+ }
+ 
