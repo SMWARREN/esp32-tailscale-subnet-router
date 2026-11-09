@@ -1,6 +1,6 @@
 # ESP32 Tailscale Subnet Router
 
-Turn a $20 ESP32-S3 board into a **Tailscale subnet router** that runs on Arduino, with no computer or Raspberry Pi needed. We use it to reach home Bitaxe-style miners (AxeOS) from anywhere with the [HashFleet](https://github.com/SMWARREN) app, using their normal LAN addresses. The same approach works for any small set of LAN devices.
+Turn a $20 ESP32-S3 board into a **Tailscale subnet router** that runs on Arduino, with no computer or Raspberry Pi needed. We use it to reach home Bitaxe-style miners (AxeOS) from anywhere with the [HashFleet](https://github.com/SMWARREN/HashFleet) app ([setup guide](https://github.com/SMWARREN/HashFleet/blob/main/docs/REMOTE-ACCESS-TAILSCALE.md)), using their normal LAN addresses. The same approach works for any small set of LAN devices.
 
 **Status:** working and validated on 2026-11-09. A phone on cellular with Tailscale on could reach and control all four miners through the board. With Tailscale off they were unreachable.
 
